@@ -6,7 +6,9 @@ import {
 import {
   createInMemoryProductDataStore,
   createProductBackedDeliveryStateStore,
+  createSupabaseProductDataStore,
 } from "../backend/services/product-data.js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 const investigationId = "inv_01K123456789AB";
 
@@ -101,6 +103,40 @@ function createInput() {
 }
 
 describe("product data persistence", () => {
+  it.each([
+    [true, "unavailable", "completed"],
+    [true, "blocked", "completed"],
+    [true, "proven", "completed"],
+    [false, "unavailable", "skipped"],
+    [false, "blocked", "failed"],
+  ] as const)("persists verification accurately (verified=%s, regression=%s)", async (verified, status, expected) => {
+    const row = { id: "internal-id", investigation_id: investigationId,
+      record: { investigationId, errors: [], fixer: {
+        verifiedFixAttemptId: verified ? "fix-1" : null,
+      } } };
+    const insert = vi.fn().mockResolvedValue({ error: null });
+    const builder = {
+      select: () => builder, eq: () => builder, upsert: () => builder,
+      maybeSingle: async () => ({ data: row, error: null }),
+      single: async () => ({ data: row, error: null }), insert,
+    };
+    const supabase = { from: () => builder } as unknown as SupabaseClient;
+    await createSupabaseProductDataStore(supabase).record({
+      type: "regression_proof", investigationId, at: "2026-10-22T03:46:04.000Z",
+      status, testName: null, prePatch: null, postPatch: null, hashMatched: null,
+    });
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({
+      event_type: "regression_proof", stage_key: "verify", stage_status: expected,
+      details: expect.objectContaining({ status }),
+    }));
+    const message = insert.mock.calls[0][0].message as string;
+    if (verified && status !== "proven") {
+      expect(message).toContain("Exact saved replay passed");
+      expect(message).toContain("advisory");
+      expect(message).not.toContain("Regression proof passed");
+    }
+  });
+
   it("claims a triggering comment once and retains the original public id", async () => {
     const store = createInMemoryProductDataStore();
 

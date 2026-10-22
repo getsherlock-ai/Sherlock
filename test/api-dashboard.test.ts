@@ -17,6 +17,7 @@ const INV = "inv_01K123456789AB";
 function investigationView() {
   return {
     id: INV,
+    repositoryId: "555",
     issueTitle: "Broken dashboard",
     status: "active" as const,
     error: null,
@@ -264,7 +265,14 @@ describe("dashboard product API", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-cache");
     const etag = response.headers.get("etag");
-    expect(etag).toBe(`W/"investigation-${INV}-4"`);
+    expect(etag).toBe(`W/"investigation-${INV}-4-view3"`);
+    await expect(response.json()).resolves.toMatchObject({ repositoryId: "555" });
+
+    const oldProjection = await fetch(
+      `${booted.baseUrl}/api/investigations/${INV}`,
+      { headers: { Authorization: "Bearer token-a", "If-None-Match": `W/"investigation-${INV}-4"` } },
+    );
+    expect(oldProjection.status).toBe(200);
 
     const unchanged = await fetch(
       `${booted.baseUrl}/api/investigations/${INV}`,
@@ -297,7 +305,7 @@ describe("dashboard product API", () => {
     pending = false;
     const published = await fetch(url, { headers });
     expect(published.status).toBe(200);
-    expect(published.headers.get("etag")).toBe(`W/"investigation-${INV}-4"`);
+    expect(published.headers.get("etag")).toBe(`W/"investigation-${INV}-4-view3"`);
     headers["If-None-Match"] = published.headers.get("etag")!;
     expect((await fetch(url, { headers })).status).toBe(304);
   });

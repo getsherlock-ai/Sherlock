@@ -31,6 +31,48 @@ describe("dashboard result publication", () => {
 });
 
 describe("dashboard timeline projection", () => {
+  test.each(["unavailable", "blocked"])(
+    "uses exact replay verification when legacy regression evidence is %s",
+    (regressionStatus) => {
+      const timeline = reduceTimeline([
+        { id: 1, stage_key: "apply_fix", stage_status: "completed",
+          message: "Fix applied.", occurred_at: "2026-10-22T03:46:03.000Z" },
+        { id: 2, event_type: "regression_proof", details: { status: regressionStatus },
+          stage_key: "verify", stage_status: "failed",
+          message: `Regression proof ${regressionStatus}.`, occurred_at: "2026-10-22T03:46:04.000Z" },
+        { id: 3, stage_key: "open_pr", stage_status: "completed",
+          message: "Investigation delivery completed.", occurred_at: "2026-10-22T03:47:00.000Z" },
+      ], "completed", true);
+
+      expect(timeline[4]).toMatchObject({ status: "completed",
+        message: `Exact saved replay passed. Generated regression test ${regressionStatus} (advisory).` });
+      expect(timeline[5].status).toBe("completed");
+    },
+  );
+
+  test.each([
+    ["unavailable", "skipped"],
+    ["blocked", "failed"],
+    ["proven", "completed"],
+  ] as const)("keeps %s regression evidence truthful without a verified fix", (proof, expected) => {
+    const timeline = reduceTimeline([
+      { id: 1, event_type: "regression_proof", details: { status: proof },
+        stage_key: "verify", stage_status: "failed", message: `Regression proof ${proof}.`,
+        occurred_at: "2026-10-22T03:46:04.000Z" },
+    ], "completed", false);
+    expect(timeline[4].status).toBe(expected);
+    expect(timeline[4].message).not.toContain("Exact saved replay passed");
+  });
+
+  test("preserves unrelated verification failures even when a verified fix is recorded", () => {
+    const timeline = reduceTimeline([
+      { id: 1, event_type: "repository_validation", details: { status: "unavailable" },
+        stage_key: "verify", stage_status: "failed", message: "Repository validation failed.",
+        occurred_at: "2026-10-22T03:46:04.000Z" },
+    ], "completed", true);
+    expect(timeline[4]).toMatchObject({ status: "failed", message: "Repository validation failed." });
+  });
+
   test("advances prior steps when a later stage becomes active", () => {
     const timeline = reduceTimeline(
       [
