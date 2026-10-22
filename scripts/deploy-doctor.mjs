@@ -13,7 +13,7 @@
 
 import { execFile } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -55,7 +55,8 @@ const stripDotSlash = (path) => path.replace(/^\.\//, "");
  * GitHub App key: the compose default itself, or any
  * `…/secrets/github-app-private-key.pem` under a different root. */
 function resolvesToProductionKey(path, cwd) {
-  return resolve(cwd ?? ".", path).endsWith(`/${stripDotSlash(DEFAULT_PRIVATE_KEY_FILE)}`);
+  const normalized = resolve(cwd ?? ".", path).split(sep).join("/");
+  return normalized.endsWith(`/${stripDotSlash(DEFAULT_PRIVATE_KEY_FILE)}`);
 }
 
 /** Redact secret-bearing content from an unexpected error before printing:

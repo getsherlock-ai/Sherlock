@@ -11,10 +11,15 @@ import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { CONTAINER_DEFAULTS } from "../backend/services/container.js";
 import {
-  runSandboxInvestigation,
+  runSandboxInvestigation as runSandbox,
   SandboxUnreachableError,
   type DockerAdapter,
 } from "../backend/services/sandbox.js";
+
+// These fixtures model a host-run worker. Do not let the test runner's own
+// /.dockerenv marker change that model; network-mode tests override it below.
+const runSandboxInvestigation = (input: Parameters<typeof runSandbox>[0]) =>
+  runSandbox({ containerized: false, addressing: { mode: "host" }, ...input });
 
 async function createFixtureRepo() {
   const repoPath = await mkdtemp(path.join(tmpdir(), "sherlock-sandbox-"));
@@ -137,7 +142,7 @@ describe("container-only sandbox", () => {
     // npm install ran in its own short-lived container.
     const install = spawned[0];
     expect(install[install.indexOf("--name") + 1]).toMatch(/^sherlock-install-/);
-    expect(install.slice(-2)).toEqual(["npm", "install"]);
+    expect(install.slice(-3)).toEqual(["npm", "install", "--no-audit"]);
     const installWorkspace = mountedWorkspace(install);
     expect(installWorkspace).not.toBe(repoPath);
     await expect(access(path.join(installWorkspace, ".git"))).rejects.toThrow();

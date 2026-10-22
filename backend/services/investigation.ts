@@ -519,6 +519,10 @@ export async function runInvestigationPipeline(
     log(
       `Sandbox started at ${sandboxSession.result.baseUrl} (network policy: ${getSandboxNetworkPolicy()})`,
     );
+    // A later patch restart can stop this session and fail to replace it.
+    // Preserve its startup evidence for reporting without requiring a live
+    // app after verification has rejected the patch.
+    const initialSandboxResult = sandboxSession.result;
 
     // --- Graph context (docs/fable/07): issue-specific repo context -------
     const graphContext = await buildGraphContext({
@@ -1404,7 +1408,7 @@ export async function runInvestigationPipeline(
           packageJson: repoContext.packageJson,
           readme: repoContext.readme,
           sourceFiles: contextSourceFiles,
-          sandboxResult: sandboxSession.result,
+          sandboxResult: sandboxSession?.result ?? initialSandboxResult,
           browserResult: result,
         },
         inferenceTelemetry,

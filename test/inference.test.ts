@@ -6,6 +6,7 @@
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 import Anthropic from "@anthropic-ai/sdk";
 import {
@@ -282,6 +283,80 @@ describe("runInference", () => {
     expect(calls).toBe(1);
   });
 
+  test("retries SDK connection errors instead of treating them as permanent API failures", async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const message = await runInference({ phase: "plan" }, BASE_PARAMS, {
+      create: async () => {
+        calls += 1;
+        if (calls === 1) throw new Anthropic.APIConnectionError({});
+        return fakeMessage();
+      },
+      sleep: async (ms) => { sleeps.push(ms); },
+      random: () => 1,
+    });
+    expect(message.stop_reason).toBe("end_turn");
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([500]);
+  });
+
+  test("backs off between transient failures and never sleeps after the last attempt", async () => {
+    const sleeps: number[] = [];
+    let calls = 0;
+    await expect(runInference(
+      { phase: "fix", policy: { maxAttempts: 3 } },
+      BASE_PARAMS,
+      {
+        create: async () => { calls += 1; throw new Anthropic.APIConnectionTimeoutError(); },
+        sleep: async (ms) => { sleeps.push(ms); },
+        random: () => 1,
+      },
+    )).rejects.toThrow("timed out");
+    expect(calls).toBe(3);
+    expect(sleeps).toEqual([500, 1_000]);
+  });
+
+  test.each([
+    ["retry-after-ms", "1250", 1_250],
+    ["retry-after", "2", 2_000],
+    ["retry-after", "Wed, 21 Oct 2026 10:00:03 GMT", 3_000],
+    ["retry-after", "invalid", 500],
+    ["retry-after", "-2", 500],
+    ["retry-after", "120", 60_000],
+  ])("rate-limit retries honor bounded %s=%s", async (header, value, expected) => {
+    const sleeps: number[] = [];
+    let calls = 0;
+    await runInference({ phase: "reproduce" }, BASE_PARAMS, {
+      create: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Anthropic.RateLimitError(429, undefined, "rate limited", new Headers({ [header]: value }));
+        }
+        return fakeMessage();
+      },
+      sleep: async (ms) => { sleeps.push(ms); },
+      now: () => Date.parse("2026-10-21T10:00:00Z"),
+      random: () => 1,
+    });
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([expected]);
+  });
+
+  test.each([
+    new Anthropic.APIUserAbortError(),
+    new Anthropic.BadRequestError(400, undefined, "request timed out in invalid input", new Headers()),
+    new Anthropic.AuthenticationError(401, undefined, "invalid key", new Headers()),
+  ])("never sleeps or retries terminal SDK errors: %s", async (error) => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    await expect(runInference({ phase: "plan" }, BASE_PARAMS, {
+      create: async () => { calls += 1; throw error; },
+      sleep: async (ms) => { sleeps.push(ms); },
+    })).rejects.toBe(error);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
   test("service tier is sent and actual response tier is recorded", async () => {
     const dir = await makeRecorderDir();
     const recorder = createInferenceRecorder(dir);
@@ -422,6 +497,12 @@ describe("applyCacheMode", () => {
 });
 
 describe("classifyError", () => {
+  test("SDK exception types take precedence over generic API errors and message text", () => {
+    expect(classifyError(new Anthropic.APIConnectionError({}))).toBe("network");
+    expect(classifyError(new Anthropic.APIConnectionTimeoutError())).toBe("timeout");
+    expect(classifyError(new Anthropic.APIUserAbortError())).toBe("aborted");
+    expect(classifyError(new Anthropic.BadRequestError(400, undefined, "timed out", new Headers()))).toBe("api_400");
+  });
   test("categories", () => {
     const abort = new Error("x");
     abort.name = "AbortError";
@@ -435,7 +516,7 @@ describe("classifyError", () => {
 describe("SDK-call guard", () => {
   test("no production file outside the gateway constructs an Anthropic client or calls messages.create", async () => {
     const { readdir: rd, readFile: rf } = await import("node:fs/promises");
-    const root = new URL("../backend", import.meta.url).pathname;
+    const root = fileURLToPath(new URL("../backend", import.meta.url));
     const offenders: string[] = [];
 
     const walk = async (dir: string): Promise<void> => {

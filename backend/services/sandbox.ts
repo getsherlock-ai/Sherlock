@@ -145,7 +145,9 @@ export async function runSandboxInvestigation({
       purpose: "install",
       workspacePath: runtime.path,
       env: buildTargetEnv({ port: hostPort }),
-      command: ["npm", "install"],
+      // Audit is an optional registry request, not a dependency-install or
+      // reproduction gate. A stalled audit endpoint must not prevent startup.
+      command: ["npm", "install", "--no-audit"],
       timeoutMs: INSTALL_TIMEOUT_MS,
     });
 

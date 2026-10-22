@@ -10,7 +10,7 @@
 
 import path from "node:path";
 import { mkdir, rename } from "node:fs/promises";
-import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 import { truncateWithMarker } from "./bounded-text.js";
 import {
   getPlanMode,
@@ -543,9 +543,7 @@ export async function executeReproductionPlan(
     }
   }
 
-  const page = recordingContext
-    ? await recordingContext.newPage()
-    : await browser.newPage();
+  const page = await createPageWithCleanup(browser, recordingContext);
   page.setDefaultTimeout(STEP_TIMEOUT_MS);
   page.setDefaultNavigationTimeout(STEP_TIMEOUT_MS);
 
@@ -1224,7 +1222,7 @@ export async function openLiveSession(
   }
 
   const browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await createPageWithCleanup(browser);
   page.setDefaultTimeout(STEP_TIMEOUT_MS);
   page.setDefaultNavigationTimeout(STEP_TIMEOUT_MS);
 
@@ -1254,6 +1252,20 @@ export async function openLiveSession(
       await browser.close().catch(() => {});
     },
   };
+}
+
+// Page creation precedes the session's normal finally/close path. If it
+// fails after launch, release the browser here without masking that error.
+async function createPageWithCleanup(
+  browser: Browser,
+  context: BrowserContext | null = null,
+): Promise<Page> {
+  try {
+    return await (context ?? browser).newPage();
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
 }
 
 const MAX_DIGEST_ELEMENTS = 200;

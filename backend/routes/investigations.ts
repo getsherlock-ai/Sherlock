@@ -2,6 +2,7 @@ import express from "express";
 import { isInvestigationId } from "../services/artifacts.js";
 import { getAuthContext } from "../middleware/require-auth.js";
 import type { ProductReadStore } from "../services/product-read.js";
+import { DASHBOARD_PROJECTION_VERSION } from "../services/product-read.js";
 import { apiErrors, sendRouteError } from "./api-errors.js";
 
 export type InvestigationsRouterDeps = {
@@ -26,10 +27,10 @@ export function createInvestigationsRouter(
       );
       if (!investigation) throw apiErrors.notFound();
 
-      const etag = `W/"investigation-${investigation.id}-${investigation.version}"`;
+      const etag = `W/"investigation-${investigation.id}-${investigation.version}-view${DASHBOARD_PROJECTION_VERSION}${investigation.projectionPending ? "-publishing" : ""}"`;
       res.setHeader("ETag", etag);
       res.setHeader("Cache-Control", "private, no-cache");
-      if (req.headers["if-none-match"] === etag) {
+      if (!investigation.projectionPending && req.headers["if-none-match"] === etag) {
         res.status(304).end();
         return;
       }

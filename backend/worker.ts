@@ -28,7 +28,8 @@ import {
   processInvestigationJobWithConcurrency,
   type WorkerDeps,
 } from "./queue/process-investigation.js";
-import { cleanupAllContainers } from "./services/container.js";
+import { cleanupAllContainers, cleanupAllContainersSync } from "./services/container.js";
+import { armWorkerShutdownDeadline } from "./worker-shutdown.js";
 import {
   createDeliveryGitHubRestClient,
   createFileDeliveryStateStore,
@@ -305,6 +306,7 @@ async function shutdown(signal: string) {
   }
 
   shuttingDown = true;
+  const cancelDeadline = armWorkerShutdownDeadline({ cleanup: cleanupAllContainersSync });
   console.log(`Received ${signal}; closing worker, queue connection, and sandboxes...`);
 
   try {
@@ -325,6 +327,7 @@ async function shutdown(signal: string) {
     console.log(`Force-removed ${cleaned.length} leftover target container(s).`);
   }
 
+  cancelDeadline();
   process.exit(0);
 }
 

@@ -21,7 +21,7 @@
 // - containers talk to the host's Docker daemon via the CLI; the daemon
 //   itself is trusted infrastructure.
 
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
@@ -346,16 +346,44 @@ export function untrackContainer(name: string) {
   liveContainers.delete(name);
 }
 
+async function removeTrackedContainer(name: string, docker: DockerAdapter): Promise<boolean> {
+  try {
+    await docker.removeContainer(name);
+    untrackContainer(name);
+    return true;
+  } catch {
+    // A lost Docker connection is not proof of removal. Keep ownership so
+    // another cleanup pass can retry when the daemon becomes reachable.
+    return false;
+  }
+}
+
 export async function cleanupAllContainers(): Promise<string[]> {
   const cleaned: string[] = [];
 
   for (const [name, docker] of [...liveContainers.entries()]) {
-    await docker.removeContainer(name).catch(() => {});
-    liveContainers.delete(name);
-    cleaned.push(name);
+    if (await removeTrackedContainer(name, docker)) {
+      cleaned.push(name);
+    }
   }
 
   return cleaned;
+}
+
+// Last resort at the worker shutdown deadline only. Keep the event loop
+// blocked until the caller exits: removing a sandbox must not resume its
+// interrupted pipeline and publish a false terminal failure during shutdown.
+// One argv call bounds the entire sweep, regardless of worker concurrency.
+export function cleanupAllContainersSync(): string[] {
+  const names = [...liveContainers.keys()];
+  if (names.length === 0) return [];
+  execFileSync("docker", ["rm", "-f", ...names], {
+    timeout: 20_000,
+    killSignal: "SIGKILL",
+    stdio: "ignore",
+  });
+  for (const name of names) untrackContainer(name);
+  return names;
 }
 
 export function createContainerName(purpose: string) {
@@ -406,7 +434,13 @@ export async function runContainerCommand(
   let stderr = "";
   let timedOut = false;
 
-  const child = docker.spawnContainer(args);
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = docker.spawnContainer(args);
+  } catch (error) {
+    await removeTrackedContainer(containerName, docker);
+    throw error;
+  }
 
   if (needsStdin) {
     child.stdin.on("error", () => {
@@ -436,8 +470,8 @@ export async function runContainerCommand(
   const exitCode = await new Promise<number>((resolve) => {
     const timer = setTimeout(() => {
       timedOut = true;
-      // Forced cleanup on timeout: never leave the container running.
-      void docker.removeContainer(containerName).catch(() => {});
+      // The awaited cleanup below force-removes the container. Avoid two
+      // simultaneous rm calls racing against each other on this path.
       child.kill("SIGKILL");
       resolve(124);
     }, spec.timeoutMs);
@@ -452,10 +486,9 @@ export async function runContainerCommand(
     });
   });
 
-  // Guaranteed cleanup on every path (success, failure, timeout). `--rm`
-  // usually already removed it; rm -f is the explicit backstop.
-  await docker.removeContainer(containerName).catch(() => {});
-  untrackContainer(containerName);
+  // Attempt cleanup on every path; failed removals remain tracked for the
+  // shutdown sweep. `--rm` usually already removed a completed container.
+  await removeTrackedContainer(containerName, docker);
 
   return {
     exitCode,
@@ -492,8 +525,7 @@ export function startAppContainer(
     sanitizedCommand,
     process: child,
     stop: async () => {
-      await docker.removeContainer(containerName).catch(() => {});
-      untrackContainer(containerName);
+      await removeTrackedContainer(containerName, docker);
 
       if (child.exitCode === null) {
         child.kill("SIGTERM");

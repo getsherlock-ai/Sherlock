@@ -4,6 +4,11 @@
 
 ## Setup
 
+For local development on this PC, run `npm run dev:local` and open
+`http://127.0.0.1:4000/healthz`. This starts the local HTTP API only.
+See [the local startup and testing guide](docs/local-testing.md) for exact
+PowerShell commands and what a successful test looks like.
+
 ```sh
 # Install dependencies
 npm install
@@ -13,6 +18,25 @@ npm start
 ```
 
 ## Docker
+
+### Local recovery integration tests
+
+With a local Redis running, opt into the real queue/recovery checks:
+
+```powershell
+$env:DOTENV_CONFIG_PATH = ".env.test.disabled"
+$env:SHERLOCK_TEST_REDIS_URL = "redis://127.0.0.1:6379"
+npm run test:integration
+```
+
+These tests cover concurrent enqueue deduplication, lost acknowledgements,
+delivery retry recovery, stalled workers, and concurrency lease ownership.
+They accept only a loopback Redis endpoint and create isolated queue prefixes
+and unique claim/lease keys. They use local fixtures and no GitHub, Supabase,
+or model calls. Without `SHERLOCK_TEST_REDIS_URL`, the normal test suite skips
+these integration tests.
+
+### Application image
 
 ```sh
 # 1. Build container

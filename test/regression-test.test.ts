@@ -2,10 +2,13 @@
 // classification, container-only execution, the hash gate, and truthful
 // comment lines. Command execution is mocked through the Docker adapter.
 import { EventEmitter } from "node:events";
+import { execFile } from "node:child_process";
+import { createServer } from "node:http";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import type { DockerAdapter } from "../backend/services/container.js";
 import {
@@ -109,6 +112,84 @@ describe("regression proposal validation", () => {
 });
 
 describe("regression generation prompt", () => {
+  test("does not compile away browser setup when an API assertion follows UI actions", () => {
+    const plan = {
+      version: 1, baseUrl: "http://localhost:3000",
+      expectedBehavior: "Completed tasks stay archived.",
+      failureCondition: "Archived tasks reappear.",
+      steps: [
+        { id: "open", action: "goto", path: "/" },
+        { id: "archive", action: "click", target: { role: "button", name: "Archive completed" } },
+        { id: "check", action: "request", method: "GET", path: "/tasks" },
+      ],
+      assertion: { type: "response_body", failureContains: '"count":1', expectedContains: '"count":0' },
+    } as ReproductionPlan;
+    expect(compileDeterministicApiRegressionTest(plan, null)).toBeNull();
+
+    // Captured browser traffic cannot substitute for the UI state either.
+    const browserOnly = { ...plan, steps: plan.steps.slice(0, 2) };
+    const result = {
+      apiResponses: [{ method: "GET", url: "http://localhost:3000/tasks", body: '{"count":1}' }],
+    } as ReproductionResult;
+    expect(compileDeterministicApiRegressionTest(browserOnly, result)).toBeNull();
+  });
+
+  test("does not compile away API setup or assume setup requests are session independent", () => {
+    const plan: ReproductionPlan = {
+      version: 1, baseUrl: "http://localhost:3000",
+      expectedBehavior: "The initialized application returns a healthy result.",
+      failureCondition: "The initialized application is broken.",
+      steps: [
+        { id: "setup", action: "request", method: "POST", path: "/setup", body: { enabled: true } },
+        { id: "check", action: "request", method: "GET", path: "/result" },
+      ],
+      assertion: { type: "response_body", method: "GET", pathPattern: "/result", failureContains: '"broken":true' },
+    };
+    expect(compileDeterministicApiRegressionTest(plan, null)).toBeNull();
+  });
+
+  test("compiled standalone API regression proves fail-before/pass-after with identical bytes", async () => {
+    let initialized = false;
+    let fixed = false;
+    const server = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET" && req.url === "/result") initialized = true;
+      res.end(JSON.stringify({ broken: initialized && !fixed }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const plan: ReproductionPlan = {
+        version: 1, baseUrl,
+        expectedBehavior: "The initialized application returns a healthy result.",
+        failureCondition: "The initialized application returns broken=true.",
+        steps: [
+          { id: "settle", action: "wait", ms: 10 },
+          { id: "check", action: "request", method: "GET", path: "/result" },
+        ],
+        assertion: { type: "response_body", method: "GET", pathPattern: "/result", failureContains: '"broken":true', expectedContains: '"broken":false' },
+      };
+      const generated = compileDeterministicApiRegressionTest(plan, null);
+      expect(generated).not.toBeNull();
+      const dir = await mkdtemp(path.join(tmpdir(), "sherlock-api-setup-"));
+      const file = path.join(dir, generated!.relativePath);
+      await writeFile(file, generated!.contents);
+      const run = () => promisify(execFile)(process.execPath, [file], {
+        env: { ...process.env, SHERLOCK_TARGET_URL: baseUrl }, timeout: 5_000,
+      });
+      await expect(run()).rejects.toMatchObject({ stderr: expect.stringContaining(REGRESSION_FAILURE_MARKER_PREFIX) });
+      expect(initialized).toBe(true);
+      initialized = false;
+      fixed = true;
+      await expect(run()).resolves.toMatchObject({ stderr: "" });
+      expect(initialized).toBe(true);
+      expect(hashTestContents(await readFile(file, "utf8"))).toBe(hashTestContents(generated!.contents));
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   test("compiles API assertions deterministically with safely serialized values", () => {
     const plan: ReproductionPlan = {
       version: 1,

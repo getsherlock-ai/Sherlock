@@ -1,7 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { PRIVATE_ARTIFACT_BUCKET } from "./product-data.js";
+import { PRIVATE_ARTIFACT_BUCKET, regressionProofProjection } from "./product-data.js";
 
 export const MEDIA_SIGNED_URL_TTL_SECONDS = 60 * 60;
+export const DASHBOARD_PROJECTION_VERSION = 3;
 
 export type DashboardInvestigationStatus = "active" | "completed" | "failed";
 export type DashboardTimelineStatus =
@@ -13,6 +14,10 @@ export type DashboardTimelineStatus =
 
 export type DashboardInvestigation = {
   id: string;
+  repositoryId: string | null;
+  // Execution can finish before the private result/media and GitHub delivery
+  // projections have been published. Consumers must keep refreshing then.
+  projectionPending?: boolean;
   issueTitle: string;
   status: DashboardInvestigationStatus;
   error: string | null;
@@ -111,6 +116,8 @@ type StateRow = {
 
 type EventRow = {
   id: number;
+  event_type?: string;
+  details?: { status?: string } | null;
   stage_key: DashboardInvestigation["timeline"][number]["id"] | null;
   stage_status: DashboardTimelineStatus | null;
   message: string | null;
@@ -149,6 +156,23 @@ type DeliveryRow = {
   terminal_comment_status: string;
   terminal_reason: string | null;
 };
+
+export function isDashboardProjectionPending(input: {
+  status: DashboardInvestigationStatus;
+  hasResult: boolean;
+  media: Array<Pick<MediaRow, "phase" | "kind" | "status">>;
+  delivery: Pick<DeliveryRow, "pr_status" | "terminal_comment_status"> | null;
+}): boolean {
+  if (input.status === "active") return false;
+  if (!input.hasResult || !input.delivery || input.delivery.pr_status === "pending"
+    || input.delivery.terminal_comment_status === "pending") return true;
+  // persistResult writes an explicit ready/error/unavailable record for each
+  // phase and kind. A missing record means publication has not reached it yet;
+  // unavailable media is a final result, not a reason to poll forever.
+  return (["before", "after"] as const).some((phase) =>
+    (["video", "screenshot"] as const).some((kind) =>
+      !input.media.some((item) => item.phase === phase && item.kind === kind && item.status !== "pending")));
+}
 
 const timelineTemplate: DashboardInvestigation["timeline"] = [
   {
@@ -221,7 +245,18 @@ export function reduceTimeline(
   const timeline = timelineTemplate.map((item) => ({ ...item }));
   const position = new Map(timeline.map((item, index) => [item.id, index]));
 
-  for (const event of events) {
+  for (const storedEvent of events) {
+    // Reproject structured evidence on read so older investigations receive
+    // the same correction without rewriting their persisted audit events.
+    const projection = storedEvent.event_type === "regression_proof"
+      && typeof storedEvent.details?.status === "string"
+      ? regressionProofProjection(storedEvent.details.status, verifiedFix)
+      : null;
+    const event = projection ? {
+      ...storedEvent,
+      stage_status: projection.stageStatus,
+      message: projection.message,
+    } : storedEvent;
     if (!event.stage_key || !event.stage_status) continue;
     const index = position.get(event.stage_key);
     if (index === undefined) continue;
@@ -494,7 +529,7 @@ export function createSupabaseProductReadStore(
         await Promise.all([
           supabase
             .from("investigation_events")
-            .select("id,stage_key,stage_status,message,occurred_at")
+            .select("id,event_type,details,stage_key,stage_status,message,occurred_at")
             .eq("investigation_id", row.id)
             .order("id", { ascending: true }),
           supabase
@@ -566,6 +601,8 @@ export function createSupabaseProductReadStore(
 
       return {
         id: row.investigation_id,
+        repositoryId: row.repository_id,
+        projectionPending: isDashboardProjectionPending({ status, hasResult: result !== null, media, delivery }),
         issueTitle: row.issue_title ?? row.record?.issueTitle ?? "GitHub issue",
         status,
         error:

@@ -3,7 +3,7 @@
 // All Docker interaction is faked through the adapter — no daemon required.
 import { EventEmitter } from "node:events";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import {
   CONTAINER_DEFAULTS,
   buildContainerRunArgs,
@@ -14,8 +14,73 @@ import {
   isProtectedEnvName,
   runContainerCommand,
   sanitizeDockerCommand,
+  cleanupAllContainers,
+  startAppContainer,
+  trackContainer,
   type DockerAdapter,
 } from "../backend/services/container.js";
+
+afterEach(async () => { await cleanupAllContainers(); });
+
+describe("cleanup after temporary Docker failures", () => {
+  test("a failed sweep retains the container for a later retry and does not report it as removed", async () => {
+    let calls = 0;
+    const name = "sherlock-audit-cleanup-retry";
+    const adapter: DockerAdapter = {
+      isAvailable: async () => true,
+      spawnContainer: () => createFakeProcess(),
+      removeContainer: async () => { if (++calls === 1) throw new Error("Docker temporarily unavailable"); },
+    };
+    trackContainer(name, adapter);
+    expect(await cleanupAllContainers()).not.toContain(name);
+    expect(await cleanupAllContainers()).toContain(name);
+    expect(calls).toBe(2);
+  });
+
+  test("command cleanup can be retried after Docker removal fails", async () => {
+    const child = createFakeProcess();
+    let calls = 0;
+    const adapter: DockerAdapter = {
+      isAvailable: async () => true,
+      spawnContainer: () => child,
+      removeContainer: async () => { if (++calls === 1) throw new Error("connection reset"); },
+    };
+    const pending = runContainerCommand(adapter, {
+      purpose: "cleanup-retry", workspacePath: "/tmp/ws", env: {}, command: ["true"], timeoutMs: 5_000,
+    });
+    child.emitAndClose("", "", 0);
+    expect((await pending).exitCode).toBe(0);
+    expect(await cleanupAllContainers()).toHaveLength(1);
+    expect(calls).toBe(2);
+  });
+
+  test("application stop keeps a failed removal available to the shutdown sweep", async () => {
+    let calls = 0;
+    const adapter: DockerAdapter = {
+      isAvailable: async () => true,
+      spawnContainer: () => createFakeProcess(),
+      removeContainer: async () => { if (++calls === 1) throw new Error("Docker temporarily unavailable"); },
+    };
+    const app = startAppContainer(adapter, { workspacePath: "/tmp/ws", env: {}, command: ["node", "server.js"] });
+    await app.stop();
+    expect(await cleanupAllContainers()).toContain(app.containerName);
+    expect(calls).toBe(2);
+  });
+
+  test("a synchronous spawn failure still cleans up its tracked container", async () => {
+    const removed: string[] = [];
+    const adapter: DockerAdapter = {
+      isAvailable: async () => true,
+      spawnContainer: () => { throw new Error("spawn failed"); },
+      removeContainer: async (name) => { removed.push(name); },
+    };
+    await expect(runContainerCommand(adapter, {
+      purpose: "spawn-failure", workspacePath: "/tmp/ws", env: {}, command: ["true"], timeoutMs: 5_000,
+    })).rejects.toThrow("spawn failed");
+    expect(removed).toHaveLength(1);
+    expect(await cleanupAllContainers()).toEqual([]);
+  });
+});
 
 type FakeProcess = ChildProcessWithoutNullStreams & {
   emitAndClose: (stdout: string, stderr: string, code: number) => void;

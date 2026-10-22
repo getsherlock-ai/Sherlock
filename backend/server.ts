@@ -444,9 +444,9 @@ function createDefaultProductApiDeps(env: NodeJS.ProcessEnv): ProductApiDeps {
             private: repository.private,
           });
         }
-        if (response.data.repositories.length < 100) break;
+        if (response.data.repositories.length < 100) return repositories;
       }
-      return repositories;
+      throw new Error("GitHub repository pagination limit exceeded; refusing an incomplete snapshot.");
     },
     listGitHubIssues: async ({
       installationId,
@@ -599,6 +599,8 @@ export function createApp(
       requireAuth,
       getStore: deps.getInstallationStore,
       getRateLimiter: deps.getRateLimiter,
+      fetchInstallation: deps.fetchInstallation,
+      fetchInstallationRepositories: deps.fetchInstallationRepositories,
       env,
     }),
   );

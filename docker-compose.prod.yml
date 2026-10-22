@@ -158,8 +158,8 @@ services:
       # stay OFF the sandbox network so target code cannot connect to them.
       - default
       - sandbox
-    # Graceful shutdown drains the active job and sweeps leftover target
-    # containers; give the pipeline room to finish rather than SIGKILL at 10s.
+    # Allow 90s to drain, a bounded 20s emergency sandbox sweep, and margin
+    # before Docker resorts to SIGKILL. Keep in sync with worker-shutdown.ts.
     stop_grace_period: 120s
     # This checks the shared Redis heartbeat written by this worker instance,
     # not merely whether its Node process still exists. It does not prove that

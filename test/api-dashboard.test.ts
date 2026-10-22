@@ -17,6 +17,7 @@ const INV = "inv_01K123456789AB";
 function investigationView() {
   return {
     id: INV,
+    repositoryId: "555",
     issueTitle: "Broken dashboard",
     status: "active" as const,
     error: null,
@@ -46,8 +47,12 @@ describe("dashboard product API", () => {
   let store: ReturnType<typeof createInMemoryInstallationDataStore>;
   let productRead: ProductReadStore;
   const listIssues = vi.fn();
+  const fetchInstallation = vi.fn();
+  const fetchInstallationRepositories = vi.fn();
 
   beforeEach(async () => {
+    fetchInstallation.mockReset().mockResolvedValue(makeSnapshot());
+    fetchInstallationRepositories.mockReset().mockResolvedValue([]);
     store = createInMemoryInstallationDataStore();
     const profiles = createInMemoryProfileStore();
     await store.upsertInstallationSnapshot(makeSnapshot(), {
@@ -130,12 +135,57 @@ describe("dashboard product API", () => {
         getInstallationStore: async () => store,
         getProductReadStore: async () => productRead,
         listGitHubIssues: listIssues,
+        fetchInstallation,
+        fetchInstallationRepositories,
       },
     );
   });
 
   afterEach(async () => {
     await booted.close();
+  });
+
+  test("refresh reconciles saved GitHub additions and removals for existing memberships", async () => {
+    const repos = [555, 556, 557].map((id) => ({ repositoryId: String(id), ownerLogin: "SherlockHQ",
+      name: `repo-${id}`, fullName: `SherlockHQ/repo-${id}`, private: true }));
+    fetchInstallationRepositories.mockResolvedValue(repos);
+    const refresh = () => fetch(`${booted.baseUrl}/api/installations/refresh`, {
+      method: "POST", headers: { Authorization: "Bearer token-a", "Content-Type": "application/json" }, body: "{}",
+    });
+    expect((await refresh()).status).toBe(200);
+    expect((await store.listRepositoriesForUser(USER_A)).map((r) => r.repositoryId)).toEqual(["555", "556", "557"]);
+    fetchInstallationRepositories.mockResolvedValue([repos[2]]);
+    expect((await refresh()).status).toBe(200);
+    expect((await store.listRepositoriesForUser(USER_A)).map((r) => r.repositoryId)).toEqual(["557"]);
+    expect(await store.listRepositoriesForUser(USER_B)).toEqual([]);
+    expect(fetchInstallationRepositories).toHaveBeenCalledWith("987654321");
+  });
+
+  test("refresh rejects caller-supplied IDs and never discovers another user's installations", async () => {
+    const url = `${booted.baseUrl}/api/installations/refresh`;
+    const post = (token: string, body = "{}") => fetch(url, { method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body });
+    expect((await post("invalid")).status).toBe(401);
+    expect((await post("token-a", '{"installationId":"123"}')).status).toBe(400);
+    expect((await post("token-b")).status).toBe(200);
+    expect(fetchInstallation).not.toHaveBeenCalled();
+    expect(fetchInstallationRepositories).not.toHaveBeenCalled();
+    expect(await store.listInstallationsForUser(USER_B)).toEqual([]);
+  });
+
+  test("failed repository reads preserve the snapshot, while suspension hides access", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      fetchInstallationRepositories.mockRejectedValue(new Error("GitHub unavailable"));
+      const post = () => fetch(`${booted.baseUrl}/api/installations/refresh`, { method: "POST",
+        headers: { Authorization: "Bearer token-a", "Content-Type": "application/json" }, body: "{}" });
+      expect((await post()).status).toBe(500);
+      expect((await store.listRepositoriesForUser(USER_A)).map((r) => r.repositoryId)).toEqual(["555"]);
+      fetchInstallation.mockResolvedValue(makeSnapshot({ suspendedAt: "2026-10-22T00:00:00.000Z" }));
+      expect((await post()).status).toBe(200);
+      expect(await store.listRepositoriesForUser(USER_A)).toEqual([]);
+      expect(fetchInstallationRepositories).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
   });
 
   test("lists only repositories authorized through installation membership", async () => {
@@ -215,7 +265,14 @@ describe("dashboard product API", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-cache");
     const etag = response.headers.get("etag");
-    expect(etag).toBe(`W/"investigation-${INV}-4"`);
+    expect(etag).toBe(`W/"investigation-${INV}-4-view3"`);
+    await expect(response.json()).resolves.toMatchObject({ repositoryId: "555" });
+
+    const oldProjection = await fetch(
+      `${booted.baseUrl}/api/investigations/${INV}`,
+      { headers: { Authorization: "Bearer token-a", "If-None-Match": `W/"investigation-${INV}-4"` } },
+    );
+    expect(oldProjection.status).toBe(200);
 
     const unchanged = await fetch(
       `${booted.baseUrl}/api/investigations/${INV}`,
@@ -233,6 +290,24 @@ describe("dashboard product API", () => {
       { headers: { Authorization: "Bearer token-b" } },
     );
     expect(denied.status).toBe(404);
+  });
+
+  test("does not cache incomplete result projections under the final version ETag", async () => {
+    let pending = true;
+    productRead.getInvestigation = async (userId) => userId === USER_A
+      ? { ...investigationView(), status: "completed", projectionPending: pending } : null;
+    const url = `${booted.baseUrl}/api/investigations/${INV}`;
+    const first = await fetch(url, { headers: { Authorization: "Bearer token-a" } });
+    const etag = first.headers.get("etag")!;
+    expect(etag).toContain("-publishing");
+    const headers = { Authorization: "Bearer token-a", "If-None-Match": etag };
+    expect((await fetch(url, { headers })).status).toBe(200);
+    pending = false;
+    const published = await fetch(url, { headers });
+    expect(published.status).toBe(200);
+    expect(published.headers.get("etag")).toBe(`W/"investigation-${INV}-4-view3"`);
+    headers["If-None-Match"] = published.headers.get("etag")!;
+    expect((await fetch(url, { headers })).status).toBe(304);
   });
 
   test("returns authorized exact diff data and rejects malformed ids", async () => {

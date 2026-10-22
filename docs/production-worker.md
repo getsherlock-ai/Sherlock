@@ -17,6 +17,19 @@ Apply every SQL file in `supabase/migrations/` before deployment. This creates
 the investigation-state table and the public, service-role-written
 `sherlock-evidence` bucket used for GitHub replay evidence.
 
+On SIGTERM/SIGINT the worker drains active jobs normally. If shutdown still
+has not finished after 90 seconds, it makes one synchronous, 20-second-bounded
+Docker removal attempt for its tracked target containers and exits with code
+1. Synchronous removal prevents interrupted pipeline callbacks from publishing
+a false terminal result before exit. Active queue jobs and fenced leases are
+left for existing stalled-job recovery and lease expiry; a crashed
+investigation's concurrency slot can take up to 30 minutes to expire.
+
+Keep the container stop grace period at least 120 seconds. Compose already
+sets this; manual runs need `--stop-timeout 120`. An unresponsive Docker daemon,
+an earlier SIGKILL, or a blocked Node event loop can still defeat cleanup.
+Forced shutdown does not promise clone/runtime workspace removal.
+
 ## Manual worker run
 
 A containerized worker must be attached to the same named network as sibling
@@ -26,6 +39,7 @@ target containers. The startup preflight verifies the attachment.
 docker network create sherlock-sandbox
 
 docker run -d --name sherlock-worker \
+  --stop-timeout 120 \
   --network sherlock-sandbox \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v sherlock-artifacts:/app/artifacts \

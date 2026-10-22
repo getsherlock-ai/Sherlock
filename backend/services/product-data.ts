@@ -147,7 +147,34 @@ function addDays(timestamp: string, days: number): string {
   return new Date(Date.parse(timestamp) + days * 24 * 60 * 60 * 1_000).toISOString();
 }
 
-function projectionForEvent(event: InvestigationStateEvent): EventProjection {
+export function regressionProofProjection(
+  status: string,
+  verifiedFix: boolean,
+): { stageStatus: "completed" | "failed" | "skipped"; message: string } {
+  if (status === "proven") {
+    return { stageStatus: "completed", message: "Regression proof passed." };
+  }
+  if (status === "unavailable" || status === "blocked") {
+    if (verifiedFix) {
+      return {
+        stageStatus: "completed",
+        message: `Exact saved replay passed. Generated regression test ${status} (advisory).`,
+      };
+    }
+    if (status === "unavailable") {
+      return { stageStatus: "skipped", message: "Generated regression test unavailable." };
+    }
+  }
+  return {
+    stageStatus: "failed",
+    message: `Regression proof ${safeText(status, 100)}.`,
+  };
+}
+
+function projectionForEvent(
+  event: InvestigationStateEvent,
+  verifiedFix = false,
+): EventProjection {
   switch (event.type) {
     case "created":
       return {
@@ -255,11 +282,7 @@ function projectionForEvent(event: InvestigationStateEvent): EventProjection {
     case "regression_proof":
       return {
         stageKey: "verify",
-        stageStatus: event.status === "proven" ? "completed" : "failed",
-        message:
-          event.status === "proven"
-            ? "Regression proof passed."
-            : `Regression proof ${safeText(event.status, 100)}.`,
+        ...regressionProofProjection(event.status, verifiedFix),
         dedupeKey: `regression:${event.status}`,
       };
     case "pull_request":
@@ -445,7 +468,10 @@ export function createSupabaseProductDataStore(
     row: InvestigationRow,
     event: InvestigationStateEvent,
   ) => {
-    const projection = projectionForEvent(event);
+    const projection = projectionForEvent(
+      event,
+      Boolean(row.record.fixer?.verifiedFixAttemptId),
+    );
     const { error } = await supabase.from("investigation_events").insert({
       investigation_id: row.id,
       event_type: event.type,

@@ -1096,7 +1096,9 @@ async function prepareVerificationRuntime(
     purpose: "install-verification",
     workspacePath: runtime.path,
     env: buildTargetEnv(),
-    command: ["npm", "install"],
+    // Keep verification installs consistent with application startup: the
+    // optional registry audit must not block behavioral verification.
+    command: ["npm", "install", "--no-audit"],
     timeoutMs: timeoutMs ?? 180_000,
   });
 
