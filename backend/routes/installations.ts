@@ -18,6 +18,8 @@ import {
   hashInstallationNonce,
   sortInstallationsForListing,
   type InstallationDataStore,
+  type InstallationSnapshot,
+  type RepositorySnapshot,
 } from "../services/github-installations.js";
 import type { InstallationStartRateLimiter } from "../services/rate-limit.js";
 import { apiErrors, sendRouteError } from "./api-errors.js";
@@ -85,6 +87,8 @@ export type InstallationsRouterDeps = {
   requireAuth: express.RequestHandler;
   getStore: () => Promise<InstallationDataStore>;
   getRateLimiter: () => Promise<InstallationStartRateLimiter>;
+  fetchInstallation?: (installationId: string) => Promise<InstallationSnapshot>;
+  fetchInstallationRepositories?: (installationId: string) => Promise<RepositorySnapshot[]>;
   env?: NodeJS.ProcessEnv;
   // Injectable for tests; production uses CSPRNG randomness.
   generateState?: () => string;
@@ -187,6 +191,43 @@ export function createInstallationsRouter(
 
       // The raw state leaves the backend exactly once: inside this URL.
       res.json({ url: buildInstallationUrl(appSlug, rawState) });
+    } catch (error) {
+      sendRouteError(res, error);
+    }
+  });
+
+  // Reconcile only existing memberships from GitHub's authoritative snapshot.
+  // No caller-supplied installation/repository IDs and no membership grants.
+  router.post("/refresh", deps.requireAuth, async (req, res) => {
+    try {
+      if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)
+        || Object.keys(req.body).length !== 0) {
+        throw apiErrors.invalidRequest("Request body must be an empty JSON object.");
+      }
+      if (!deps.fetchInstallation || !deps.fetchInstallationRepositories) {
+        throw apiErrors.dependencyUnavailable();
+      }
+      const { userId } = getAuthContext(res);
+      const store = await deps.getStore();
+      const installations = await store.listInstallationsForUser(userId);
+      for (const known of installations) {
+        if (known.status === "deleted") continue;
+        const snapshot = await deps.fetchInstallation(known.installationId);
+        if (snapshot.installationId !== known.installationId || snapshot.accountId !== known.accountId) {
+          throw apiErrors.dependencyUnavailable();
+        }
+        // Fetch the complete list before mutating its projection. A failed
+        // GitHub read must never be mistaken for removal of every repository.
+        const repositories = snapshot.suspendedAt ? null
+          : await deps.fetchInstallationRepositories(known.installationId);
+        const eventAt = now().toISOString();
+        await store.upsertInstallationSnapshot(snapshot, { eventAt });
+        if (repositories) {
+          await store.reconcileInstallationRepositories(known.installationId, repositories, eventAt);
+        }
+      }
+      res.setHeader("Cache-Control", "private, no-store");
+      res.json({ refreshed: true });
     } catch (error) {
       sendRouteError(res, error);
     }

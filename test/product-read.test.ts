@@ -1,9 +1,34 @@
 import { describe, expect, test } from "vitest";
 import {
   membershipAllows,
+  isDashboardProjectionPending,
   reduceTimeline,
 } from "../backend/services/product-read.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
+
+describe("dashboard result publication", () => {
+  const media = (["before", "after"] as const).flatMap((phase) =>
+    (["video", "screenshot"] as const).map((kind) => ({ phase, kind, status: "ready" as const })));
+  const complete = { status: "completed" as const, hasResult: true, media,
+    delivery: { pr_status: "created", terminal_comment_status: "posted" } };
+
+  test("finished execution keeps refreshing while its result or media is still being published", () => {
+    expect(isDashboardProjectionPending({ ...complete, hasResult: false })).toBe(true);
+    expect(isDashboardProjectionPending({ ...complete, media: media.slice(0, 2) })).toBe(true);
+    expect(isDashboardProjectionPending({ ...complete, media: media.map((m) => ({ ...m, status: "pending" })) })).toBe(true);
+    expect(isDashboardProjectionPending(complete)).toBe(false);
+  });
+
+  test("delivery must finish, and unavailable media or failed delivery are final states", () => {
+    expect(isDashboardProjectionPending({ ...complete, delivery: null })).toBe(true);
+    expect(isDashboardProjectionPending({ ...complete, delivery: { pr_status: "pending", terminal_comment_status: "posted" } })).toBe(true);
+    expect(isDashboardProjectionPending({ ...complete, delivery: { pr_status: "created", terminal_comment_status: "pending" } })).toBe(true);
+    expect(isDashboardProjectionPending({ ...complete, status: "failed",
+      media: media.map((m) => ({ ...m, status: "unavailable" })),
+      delivery: { pr_status: "blocked", terminal_comment_status: "failed" } })).toBe(false);
+    expect(isDashboardProjectionPending({ status: "active", hasResult: false, media: [], delivery: null })).toBe(false);
+  });
+});
 
 describe("dashboard timeline projection", () => {
   test("advances prior steps when a later stage becomes active", () => {

@@ -13,6 +13,9 @@ export type DashboardTimelineStatus =
 
 export type DashboardInvestigation = {
   id: string;
+  // Execution can finish before the private result/media and GitHub delivery
+  // projections have been published. Consumers must keep refreshing then.
+  projectionPending?: boolean;
   issueTitle: string;
   status: DashboardInvestigationStatus;
   error: string | null;
@@ -149,6 +152,23 @@ type DeliveryRow = {
   terminal_comment_status: string;
   terminal_reason: string | null;
 };
+
+export function isDashboardProjectionPending(input: {
+  status: DashboardInvestigationStatus;
+  hasResult: boolean;
+  media: Array<Pick<MediaRow, "phase" | "kind" | "status">>;
+  delivery: Pick<DeliveryRow, "pr_status" | "terminal_comment_status"> | null;
+}): boolean {
+  if (input.status === "active") return false;
+  if (!input.hasResult || !input.delivery || input.delivery.pr_status === "pending"
+    || input.delivery.terminal_comment_status === "pending") return true;
+  // persistResult writes an explicit ready/error/unavailable record for each
+  // phase and kind. A missing record means publication has not reached it yet;
+  // unavailable media is a final result, not a reason to poll forever.
+  return (["before", "after"] as const).some((phase) =>
+    (["video", "screenshot"] as const).some((kind) =>
+      !input.media.some((item) => item.phase === phase && item.kind === kind && item.status !== "pending")));
+}
 
 const timelineTemplate: DashboardInvestigation["timeline"] = [
   {
@@ -566,6 +586,7 @@ export function createSupabaseProductReadStore(
 
       return {
         id: row.investigation_id,
+        projectionPending: isDashboardProjectionPending({ status, hasResult: result !== null, media, delivery }),
         issueTitle: row.issue_title ?? row.record?.issueTitle ?? "GitHub issue",
         status,
         error:

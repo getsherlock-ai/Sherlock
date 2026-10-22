@@ -268,6 +268,14 @@ const CLONE_CONFIG_ARGS = [
   "credential.helper=",
 ];
 
+// Persist checkout defaults in the disposable clone, not in the user's Git
+// configuration. Clone ignores host config, while later rollback/checkouts
+// run in the host environment. Without these local defaults, autocrlf=true
+// can silently change hydrated LF source into CRLF after a rejected patch,
+// making the next otherwise exact oldText fail safety validation.
+// Repository .gitattributes can still specify their own line endings.
+const CLONE_CHECKOUT_ARGS = ["--config", "core.autocrlf=false", "--config", "core.eol=lf"];
+
 async function cloneRepo(
   cloneUrl: string,
   repoPath: string,
@@ -298,6 +306,7 @@ async function cloneRepo(
           [
             ...CLONE_CONFIG_ARGS,
             "clone",
+            ...CLONE_CHECKOUT_ARGS,
             "--depth",
             "1",
             "--single-branch",
@@ -318,7 +327,7 @@ async function cloneRepo(
 
     try {
       await runGit(
-        [...CLONE_CONFIG_ARGS, "clone", "--depth", "1", cloneUrl, repoPath],
+        [...CLONE_CONFIG_ARGS, "clone", ...CLONE_CHECKOUT_ARGS, "--depth", "1", cloneUrl, repoPath],
         { env },
       );
     } catch (error) {

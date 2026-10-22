@@ -21,6 +21,7 @@
 
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import Anthropic from "@anthropic-ai/sdk";
 
 // Lazy client, same pattern as claude.ts: importing this module (e.g. from
@@ -157,6 +158,8 @@ export type CreateFn = (
 export type InferenceDeps = {
   create?: CreateFn;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
 };
 
 // --- Recorder ----------------------------------------------------------------
@@ -456,18 +459,31 @@ function nextLogicalCallId(): string {
 }
 
 export function classifyError(error: unknown): string {
-  if (error instanceof Error && error.name === "AbortError") {
+  if (
+    error instanceof Anthropic.APIUserAbortError ||
+    (error instanceof Error && error.name === "AbortError")
+  ) {
     return "aborted";
+  }
+
+  // Connection errors inherit from APIError but have no HTTP status.
+  // Classify them before APIError so a transient connection failure retries.
+  if (error instanceof Anthropic.APIConnectionTimeoutError) {
+    return "timeout";
+  }
+
+  if (error instanceof Anthropic.APIConnectionError) {
+    return "network";
+  }
+
+  if (error instanceof Anthropic.APIError) {
+    return `api_${error.status ?? "error"}`;
   }
 
   const message = error instanceof Error ? error.message : String(error);
 
   if (/timed? ?out/i.test(message)) {
     return "timeout";
-  }
-
-  if (error instanceof Anthropic.APIError) {
-    return `api_${error.status ?? "error"}`;
   }
 
   if (/fetch|network|ECONNREFUSED|ENOTFOUND|socket/i.test(message)) {
@@ -483,6 +499,36 @@ export function isRetryableInferenceError(error: unknown): boolean {
   if (!category.startsWith("api_")) return false;
   const status = Number(category.slice(4));
   return status === 408 || status === 409 || status === 429 || status >= 500;
+}
+
+function inferenceRetryDelay(
+  error: unknown,
+  attemptCount: number,
+  now: () => number,
+  random: () => number,
+): number {
+  const maxDelayMs = 60_000;
+  if (error instanceof Anthropic.APIError && error.headers) {
+    const milliseconds = Number(error.headers.get("retry-after-ms"));
+    if (Number.isFinite(milliseconds) && milliseconds > 0) {
+      return Math.min(milliseconds, maxDelayMs);
+    }
+
+    const retryAfter = error.headers.get("retry-after");
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      const delay = Number.isNaN(seconds)
+        ? Date.parse(retryAfter) - now()
+        : seconds * 1_000;
+      if (Number.isFinite(delay) && delay > 0) {
+        return Math.min(delay, maxDelayMs);
+      }
+    }
+  }
+
+  // Bound exponential backoff and jitter so workers do not retry a rate
+  // limit or provider outage in a tight loop at the same instant.
+  return Math.min(500 * 2 ** (attemptCount - 1), 8_000) * (0.75 + random() * 0.25);
 }
 
 function estimateInputTokens(
@@ -509,6 +555,7 @@ export async function runInference(
   const create: CreateFn =
     deps.create ?? ((finalParams, options) => getClient().messages.create(finalParams, options));
   const now = deps.now ?? Date.now;
+  const wait = deps.sleep ?? sleep;
   // Policy composition (fable/16): the telemetry phase policy is the base and
   // explicitly supplied context.policy fields override it field-wise, so a
   // caller wiring one field (e.g. cacheMode) cannot discard the phase
@@ -567,9 +614,11 @@ export async function runInference(
     } catch (error) {
       lastError = error;
 
-      if (!isRetryableInferenceError(error)) {
+      if (!isRetryableInferenceError(error) || attemptCount >= maxAttempts) {
         break;
       }
+
+      await wait(inferenceRetryDelay(error, attemptCount, now, deps.random ?? Math.random));
     }
   }
 

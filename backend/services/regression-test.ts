@@ -93,7 +93,7 @@ type ApiRequestSpec = {
  */
 export function compileDeterministicApiRegressionTest(
   plan: ReproductionPlan,
-  result: ReproductionResult | null,
+  _result: ReproductionResult | null,
 ): RegressionTestProposal | null {
   if (
     plan.assertion.type !== "response_status" &&
@@ -102,8 +102,20 @@ export function compileDeterministicApiRegressionTest(
     return null;
   }
 
-  const request = selectDeterministicRequest(plan, result);
-  if (!request) {
+  // A browser action may establish cookies, create data, or trigger async
+  // work. A final GET (including captured browser traffic) cannot stand in
+  // for that setup. Multiple API requests may also depend on the browser
+  // context's cookie jar, which Node fetch does not share. Let the regular
+  // generator handle these flows instead of assuming stateless setup.
+  if (
+    plan.steps.some((step) => step.action !== "request" && step.action !== "wait") ||
+    plan.steps.filter((step) => step.action === "request").length !== 1
+  ) {
+    return null;
+  }
+
+  const selected = selectDeterministicRequest(plan);
+  if (!selected) {
     return null;
   }
 
@@ -123,16 +135,6 @@ export function compileDeterministicApiRegressionTest(
         ? `The response no longer contains the failure value and contains ${JSON.stringify(assertion.expectedContains)}.`
         : "The response no longer contains the reproduced failure value.";
 
-  const requestOptions = {
-    method: request.method,
-    ...(request.body === undefined
-      ? {}
-      : {
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(request.body),
-        }),
-  };
-
   const assertionSource =
     assertion.type === "response_status"
       ? `assert.equal(response.status, ${JSON.stringify(assertion.expected)}, ${JSON.stringify(marker)});`
@@ -148,9 +150,25 @@ export function compileDeterministicApiRegressionTest(
     'import assert from "node:assert/strict";',
     'const target = process.env.SHERLOCK_TARGET_URL;',
     'assert.ok(target, "SHERLOCK_TARGET_URL is required");',
-    `const requestUrl = new URL(${JSON.stringify(request.path)}, target);`,
-    `const response = await fetch(requestUrl, ${JSON.stringify(requestOptions)});`,
-    "const body = await response.text();",
+    `const steps = ${JSON.stringify(plan.steps)};`,
+    "let response;",
+    'let body = "";',
+    "for (const [index, step] of steps.entries()) {",
+    '  if (step.action === "wait") {',
+    "    await new Promise((resolve) => setTimeout(resolve, step.ms));",
+    "    continue;",
+    "  }",
+    "  const currentResponse = await fetch(new URL(step.path, target), {",
+    "    method: step.method,",
+    "    ...(step.body === undefined ? {} : {",
+    '      headers: { "content-type": "application/json" },',
+    "      body: JSON.stringify(step.body),",
+    "    }),",
+    "  });",
+    "  const currentBody = await currentResponse.text();",
+    `  if (index === ${selected.index}) { response = currentResponse; body = currentBody; }`,
+    "}",
+    'assert.ok(response, "The asserted API request was not executed");',
     assertionSource,
     "",
   ].join("\n");
@@ -174,8 +192,7 @@ export function compileDeterministicApiRegressionTest(
 
 function selectDeterministicRequest(
   plan: ReproductionPlan,
-  result: ReproductionResult | null,
-): ApiRequestSpec | null {
+): { request: ApiRequestSpec; index: number } | null {
   const assertion = plan.assertion;
   if (
     assertion.type !== "response_status" &&
@@ -184,44 +201,18 @@ function selectDeterministicRequest(
     return null;
   }
 
-  const explicit = [...plan.steps]
-    .reverse()
-    .find(
-      (step) =>
-        step.action === "request" &&
-        (!assertion.method || step.method === assertion.method) &&
-        (!assertion.pathPattern || step.path.includes(assertion.pathPattern)),
-    );
-
-  if (explicit?.action === "request") {
-    return {
-      method: explicit.method,
-      path: explicit.path,
-      ...(explicit.body === undefined ? {} : { body: explicit.body }),
-    };
+  for (let index = plan.steps.length - 1; index >= 0; index -= 1) {
+    const step = plan.steps[index];
+    if (
+      step.action === "request" &&
+      (!assertion.method || step.method === assertion.method) &&
+      (!assertion.pathPattern || step.path.includes(assertion.pathPattern))
+    ) {
+      return { request: step, index };
+    }
   }
 
-  // Browser-triggered API calls can be compiled only when the captured
-  // request is a bodyless GET. Reconstructing POST bodies from browser traffic
-  // would be a guess and therefore falls back truthfully.
-  const captured = [...(result?.apiResponses ?? [])]
-    .reverse()
-    .find(
-      (response) =>
-        (!assertion.method || response.method === assertion.method) &&
-        (!assertion.pathPattern || response.url.includes(assertion.pathPattern)),
-    );
-
-  if (!captured || captured.method !== "GET") {
-    return null;
-  }
-
-  try {
-    const url = new URL(captured.url);
-    return { method: "GET", path: `${url.pathname}${url.search}` };
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 // The generated runner is a plain Node process. It can faithfully exercise

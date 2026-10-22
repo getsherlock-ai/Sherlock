@@ -1,0 +1,54 @@
+# Local dashboard-demo worker. No webhook ingress or hosted deployment.
+services:
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, "yes"]
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - demo-redis:/data
+    networks: [queue]
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: sherlock-local-worker:dev
+    container_name: sherlock-local-demo-worker
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/13
+      PRIVATE_KEY_PATH: /run/secrets/github_app_private_key
+      WEBHOOK_PROXY_URL: ""
+      SHERLOCK_STATE_STORE: supabase
+      SHERLOCK_WORKER_ID: sherlock-local-demo
+      SHERLOCK_WORKER_CONTAINERIZED: "true"
+      SHERLOCK_RUN_STARTUP_CHECKS: "true"
+      SHERLOCK_SANDBOX_NETWORK: sherlock-local-demo-sandbox
+      SHERLOCK_HOST_TMP: /var/tmp/sherlock-local-demo
+      SHERLOCK_PUBLIC_REPLAY_UPLOAD_MODE: disabled
+      ARTIFACTS_DIR: /app/artifacts
+      SHERLOCK_DATA_DIR: /data/sherlock
+    secrets: [github_app_private_key]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/tmp/sherlock-local-demo:/var/tmp/sherlock-local-demo
+      # npm run worker:local compiles these first. Keep source iteration
+      # independent of dependency/image rebuilds; durable files stay on Linux.
+      - ./lib/backend:/app/lib/backend:ro
+      - ./lib/src:/app/lib/src:ro
+      - demo-artifacts:/app/artifacts
+      - demo-data:/data/sherlock
+    networks: [queue, sandbox]
+    depends_on: [redis]
+    stop_grace_period: 120s
+networks:
+  queue: {}
+  sandbox:
+    name: sherlock-local-demo-sandbox
+volumes:
+  demo-redis: {}
+  demo-artifacts: {}
+  demo-data: {}
+secrets:
+  github_app_private_key:
+    file: ${PRIVATE_KEY_PATH:-./secrets/github-app-private-key.pem}

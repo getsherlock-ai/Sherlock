@@ -40,6 +40,10 @@ async function makeGitRepo(): Promise<{ repoPath: string; commit: string }> {
 
   await writeFile(path.join(repoPath, "server.js"), ORIGINAL_SERVER, "utf8");
   await execFileAsync("git", ["init", "--quiet"], { cwd: repoPath });
+  // Match the investigation clone's pinned checkout defaults; rollback must
+  // not inherit this test machine's autocrlf/eol settings either.
+  await execFileAsync("git", ["config", "--local", "core.autocrlf", "false"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "--local", "core.eol", "lf"], { cwd: repoPath });
   await execFileAsync("git", ["add", "."], { cwd: repoPath });
   await execFileAsync(
     "git",

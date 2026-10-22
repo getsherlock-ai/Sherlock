@@ -813,6 +813,27 @@ describe("verified fix loop", () => {
     },
   );
 
+  test("an unrelated HTTP response cannot turn a reproduced failure into a verified fix", { timeout: 60_000 }, async () => {
+    const setup = await setupReproducedInvestigation();
+    const attempt = await runFixAttempt({
+      investigationId: setup.investigationId,
+      investigationDir: setup.store.dir,
+      repoPath: setup.repoPath,
+      sourceCommit: setup.commit,
+      plan: setup.plan,
+      originalOutcome: setup.original.outcome,
+      proposal: correctProposal({
+        files: [{ path: "server.mjs", edits: [{ oldText: BUGGY_RESPONSE, newText: FIXED_RESPONSE.replace("401", "403") }] }],
+      }),
+      restart: setup.restart,
+    });
+    // 403 is neither the reported 500 failure nor the expected 401 result.
+    expect(attempt.postPatchOutcome).toBe("not_reproduced");
+    expect(attempt.outcome).toBe("rejected_verification_inconclusive");
+    expect(attempt.checks.find((check) => check.name === "patch_preflight")?.status).toBe("failed");
+    expect(attempt.regressionTest).toBeNull();
+  });
+
   test("a missing reproduction precondition fails without applying anything", async () => {
     const { repoPath, commit } = await createFixtureRepo();
     const investigationId = createInvestigationId();
